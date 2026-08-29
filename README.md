@@ -31,6 +31,14 @@ ctest --test-dir build -C Release --output-on-failure
 - `ORDERBOOK_ENABLE_NATIVE_ARCH=ON`: generate non-portable host-specific code (disabled by default due to apparent performance penalty).
 - `ORDERBOOK_ENABLE_SANITIZERS=ON`: enable AddressSanitizer on MSVC or AddressSanitizer plus UndefinedBehaviorSanitizer where the GCC/Clang runtimes are installed.
 
+## CLI
+
+A CLI tool is provided for manually operating the book. It uses the fast order book by default; pass `--help` for the full list of flags.
+
+```powershell
+./build/Release/orderbook_cli.exe
+```
+
 ## Benchmark
 
 ```powershell

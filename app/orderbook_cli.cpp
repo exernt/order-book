@@ -55,6 +55,7 @@ struct CliOptions {
     };
     bool show_prompt{true};
     bool display_after_command{true};
+    bool use_fast_book{true};
 };
 
 template <typename T>
@@ -181,8 +182,11 @@ template <UnsignedInteger T>
 
 class OrderBookCli {
 public:
-    explicit OrderBookCli(OrderBookConfig config, bool display_after_command)
-        : engine_(config),
+    explicit OrderBookCli(
+        OrderBookConfig config,
+        bool display_after_command,
+        bool use_fast_book)
+        : engine_(config, use_fast_book),
           display_after_command_(display_after_command)
     {
     }
@@ -557,6 +561,7 @@ private:
         if (argument == "--help") {
             std::cout
                 << "Usage: orderbook_cli [--no-prompt] [--display true|false] "
+                   "[--fast-book true|false] "
                    "[--max-orders N] "
                    "[--max-quantity N] [--min-price N] [--max-price N]\n";
             std::exit(0);
@@ -577,6 +582,13 @@ private:
                     "--display requires either true or false");
             }
             options.display_after_command = *parsed;
+        } else if (argument == "--fast-book") {
+            const auto parsed = parse_bool(value);
+            if (!parsed) {
+                throw std::invalid_argument(
+                    "--fast-book requires either true or false");
+            }
+            options.use_fast_book = *parsed;
         } else if (argument == "--max-orders") {
             const auto parsed = parse_unsigned<std::uint32_t>(value);
             if (!parsed) {
@@ -615,7 +627,10 @@ int main(int argc, char** argv)
     enable_debug_leak_checking();
     try {
         const CliOptions options = parse_options(argc, argv);
-        OrderBookCli cli(options.book, options.display_after_command);
+        OrderBookCli cli(
+            options.book,
+            options.display_after_command,
+            options.use_fast_book);
         return cli.run(std::cin, std::cout, options.show_prompt);
     } catch (const std::exception& error) {
         std::cerr << "orderbook_cli: " << error.what() << '\n';

@@ -1,10 +1,12 @@
 #pragma once
 
+#include "orderbook/fast_order_book.hpp"
 #include "orderbook/order_book.hpp"
 
 #include <concepts>
 #include <cstdint>
 #include <optional>
+#include <variant>
 #include <vector>
 
 namespace matchingengine {
@@ -68,8 +70,9 @@ namespace matchingengine {
 
     class MatchingEngine {
     public:
-        explicit MatchingEngine(orderbook::OrderBookConfig config)
-            : book_(config) {}
+        explicit MatchingEngine(
+            orderbook::OrderBookConfig config,
+            bool use_fast_book = false);
 
         [[nodiscard]]
         std::optional<ClientId> register_client() noexcept;
@@ -105,13 +108,17 @@ namespace matchingengine {
 
             SinkAdapter adapter{sink};
             
-            return book_.submit(orderbook::NewOrder{
-                .id = make_order_id(client_id, order.order_id),
-                .quantity = order.quantity,
-                .price_ticks = order.price_ticks,
-                .side = order.side,
-                .time_in_force = order.time_in_force
-            }, adapter);
+            return std::visit(
+                [&](auto& book) {
+                    return book.submit(orderbook::NewOrder{
+                        .id = make_order_id(client_id, order.order_id),
+                        .quantity = order.quantity,
+                        .price_ticks = order.price_ticks,
+                        .side = order.side,
+                        .time_in_force = order.time_in_force
+                    }, adapter);
+                },
+                book_);
         }
 
         [[nodiscard]]
@@ -120,22 +127,36 @@ namespace matchingengine {
             ClientOrderId order_id) noexcept;
 
         [[nodiscard]] orderbook::Quote best_quote() const noexcept {
-            return book_.best_quote();
+            return std::visit(
+                [](const auto& book) { return book.best_quote(); },
+                book_);
         }
         [[nodiscard]] ClientBookSnapshot snapshot() const;
         [[nodiscard]] orderbook::BookStats stats() const noexcept {
-            return book_.stats();
+            return std::visit(
+                [](const auto& book) { return book.stats(); },
+                book_);
         }
         [[nodiscard]] bool check_invariants() const {
-            return book_.check_invariants();
+            return std::visit(
+                [](const auto& book) { return book.check_invariants(); },
+                book_);
         }
 
+        [[nodiscard]] bool uses_fast_book() const noexcept;
+
     private:
+        using Book = std::variant<orderbook::OrderBook, orderbook::FastOrderBook>;
+
+        [[nodiscard]] static Book make_book(
+            orderbook::OrderBookConfig config,
+            bool use_fast_book);
+
         [[nodiscard]]
         bool is_registered(ClientId id) const noexcept;
 
         std::uint64_t next_client_id_{1};
-        orderbook::OrderBook book_;
+        Book book_;
     };
 
 }

@@ -4,6 +4,23 @@
 #include <limits>
 #include <utility>
 
+matchingengine::MatchingEngine::MatchingEngine(
+    orderbook::OrderBookConfig config,
+    bool use_fast_book)
+    : book_(make_book(config, use_fast_book))
+{
+}
+
+matchingengine::MatchingEngine::Book matchingengine::MatchingEngine::make_book(
+    orderbook::OrderBookConfig config,
+    bool use_fast_book)
+{
+    if (use_fast_book) {
+        return Book(std::in_place_type<orderbook::FastOrderBook>, config);
+    }
+    return Book(std::in_place_type<orderbook::OrderBook>, config);
+}
+
 std::optional<matchingengine::ClientId> matchingengine::MatchingEngine::register_client() noexcept {
     constexpr auto max = std::numeric_limits<matchingengine::ClientId>::max();
 
@@ -26,11 +43,17 @@ orderbook::CancelResult matchingengine::MatchingEngine::cancel(ClientId client_i
         };
     }
 
-    return book_.cancel(make_order_id(client_id, order_id));
+    return std::visit(
+        [&](auto& book) {
+            return book.cancel(make_order_id(client_id, order_id));
+        },
+        book_);
 }
 
 matchingengine::ClientBookSnapshot matchingengine::MatchingEngine::snapshot() const {
-    const orderbook::BookSnapshot book_snapshot = book_.snapshot();
+    const orderbook::BookSnapshot book_snapshot = std::visit(
+        [](const auto& book) { return book.snapshot(); },
+        book_);
     ClientBookSnapshot result;
     result.bids.reserve(book_snapshot.bids.size());
     result.asks.reserve(book_snapshot.asks.size());
@@ -55,4 +78,9 @@ matchingengine::ClientBookSnapshot matchingengine::MatchingEngine::snapshot() co
     append_levels(book_snapshot.bids, result.bids);
     append_levels(book_snapshot.asks, result.asks);
     return result;
+}
+
+bool matchingengine::MatchingEngine::uses_fast_book() const noexcept
+{
+    return std::holds_alternative<orderbook::FastOrderBook>(book_);
 }

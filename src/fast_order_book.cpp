@@ -31,6 +31,8 @@ using detail::PoolIndex;
 using detail::PriceLevel;
 using detail::invalid_index;
 
+
+// Side and TimeInForce checks (to avoid invalid orders)
 [[nodiscard]] constexpr bool is_valid(Side side) noexcept
 {
     return side == Side::buy || side == Side::sell;
