@@ -11,6 +11,8 @@
 #include <deque>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
+#include <list>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -85,6 +87,7 @@ struct Options {
     std::size_t trials{5};
     std::uint32_t max_orders{50'000};
     std::uint32_t price_levels{201};
+    bool operation_latencies{false};
 };
 
 enum class CommandKind : std::uint8_t { submit, cancel };
@@ -110,6 +113,18 @@ struct Scenario {
     std::string description;
     std::vector<NewOrder> setup;
     std::vector<Command> commands;
+};
+
+struct OperationSample {
+    Command prepare;
+    Command measured;
+};
+
+struct OperationScenario {
+    std::string name;
+    std::string description;
+    std::vector<NewOrder> setup;
+    std::vector<OperationSample> samples;
 };
 
 struct ChecksumSink {
@@ -324,6 +339,57 @@ template <typename Book>
     return run;
 }
 
+template <typename Book>
+[[nodiscard]] LatencyRun run_operation_latencies(
+    const OperationScenario& scenario,
+    const Options& options)
+{
+    Book book(config(options.max_orders, options.price_levels));
+    ChecksumSink sink;
+    for (const NewOrder& order : scenario.setup) {
+        const SubmitResult result = book.submit(order, sink);
+        if (result.status != SubmitStatus::accepted ||
+            result.resting_quantity != order.quantity) {
+            throw std::runtime_error("operation benchmark setup order was not admitted");
+        }
+    }
+
+    for (std::size_t index = 0; index < options.warmup; ++index) {
+        execute(book, scenario.samples[index].prepare, sink);
+        execute(book, scenario.samples[index].measured, sink);
+    }
+
+    LatencyRun run;
+    run.nanoseconds.reserve(options.commands);
+    const std::uint64_t trades_before = sink.trades;
+    for (std::size_t index = options.warmup; index < scenario.samples.size(); ++index) {
+        execute(book, scenario.samples[index].prepare, sink);
+#if ORDERBOOK_HAS_INVARIANT_TSC
+        const std::uint64_t started = latency_start();
+        execute(book, scenario.samples[index].measured, sink);
+        const std::uint64_t stopped = latency_stop();
+        run.nanoseconds.push_back(
+            static_cast<double>(stopped - started) / tsc_ticks_per_nanosecond());
+#else
+        const auto started = Clock::now();
+        execute(book, scenario.samples[index].measured, sink);
+        const auto stopped = Clock::now();
+        run.nanoseconds.push_back(
+            std::chrono::duration<double, std::nano>(stopped - started).count());
+#endif
+    }
+
+    const auto stats = book.stats();
+    if (!book.check_invariants()) {
+        throw std::runtime_error("invariant failure after operation-latency run");
+    }
+    run.trades = sink.trades - trades_before;
+    run.checksum = sink.checksum;
+    run.live_orders = stats.live_orders;
+    run.preallocated_storage_bytes = stats.preallocated_storage_bytes;
+    return run;
+}
+
 [[nodiscard]] double percentile(
     const std::vector<double>& sorted,
     double fraction)
@@ -384,6 +450,100 @@ template <typename Book>
         .max_probe_length = latency.max_probe_length,
         .preallocated_storage_bytes = latency.preallocated_storage_bytes
     };
+}
+
+template <typename Book>
+[[nodiscard]] Result benchmark_operation(
+    const OperationScenario& scenario,
+    const Options& options,
+    std::string implementation)
+{
+    LatencyRun latency = run_operation_latencies<Book>(scenario, options);
+    std::sort(latency.nanoseconds.begin(), latency.nanoseconds.end());
+
+    return {
+        .implementation = std::move(implementation),
+        .name = scenario.name,
+        .description = scenario.description,
+        .p50 = percentile(latency.nanoseconds, 0.50),
+        .p90 = percentile(latency.nanoseconds, 0.90),
+        .p99 = percentile(latency.nanoseconds, 0.99),
+        .p999 = percentile(latency.nanoseconds, 0.999),
+        .trades_per_command =
+            static_cast<double>(latency.trades) / static_cast<double>(options.commands),
+        .live_orders = latency.live_orders,
+        .checksum = latency.checksum,
+        .preallocated_storage_bytes = latency.preallocated_storage_bytes
+    };
+}
+
+[[nodiscard]] OperationScenario matching_operation(
+    std::size_t count,
+    TimeInForce time_in_force,
+    std::string name,
+    OrderId first_id)
+{
+    OperationScenario scenario{
+        .name = std::move(name),
+        .description = "one resting maker followed by one fully-filled aggressive order"
+    };
+    scenario.samples.reserve(count);
+
+    OrderId next_id = first_id;
+    for (std::size_t index = 0; index < count; ++index) {
+        scenario.samples.push_back({
+            .prepare = Command::submission(
+                make_order(next_id++, Side::sell, ask_price, 10)),
+            .measured = Command::submission(
+                make_order(next_id++, Side::buy, ask_price, 10, time_in_force))
+        });
+    }
+    return scenario;
+}
+
+[[nodiscard]] OperationScenario cancellation_operation(
+    std::size_t count,
+    OrderId first_id,
+    std::uint32_t max_orders)
+{
+    constexpr std::size_t preferred_depth = 4'096;
+    std::size_t initial_depth = std::min(
+        preferred_depth, static_cast<std::size_t>(max_orders - 1));
+    if (initial_depth % 2 != 0) {
+        --initial_depth;
+    }
+    OperationScenario scenario{
+        .name = "cancel",
+        .description = "cancel a middle GTC order while same-price depth remains stable"
+    };
+    scenario.setup.reserve(initial_depth);
+    scenario.samples.reserve(count);
+
+    std::list<OrderId> live_ids;
+    OrderId next_id = first_id;
+    for (std::size_t index = 0; index < initial_depth; ++index) {
+        const OrderId id = next_id++;
+        scenario.setup.push_back(make_order(id, Side::buy, bid_price, 10));
+        live_ids.push_back(id);
+    }
+    auto middle = live_ids.begin();
+    std::advance(middle, static_cast<std::ptrdiff_t>(initial_depth / 2));
+
+    for (std::size_t index = 0; index < count; ++index) {
+        const OrderId inserted_id = next_id++;
+        const OrderId canceled_id = *middle;
+        middle = live_ids.erase(middle);
+        live_ids.push_back(inserted_id);
+        if (middle == live_ids.end()) {
+            middle = std::prev(live_ids.end());
+        }
+        scenario.samples.push_back({
+            .prepare = Command::submission(
+                make_order(inserted_id, Side::buy, bid_price, 10)),
+            .measured = Command::cancellation(canceled_id)
+        });
+    }
+    return scenario;
 }
 
 [[nodiscard]] Scenario resting_heavy(std::size_t count)
@@ -625,8 +785,13 @@ template <typename Book>
         if (argument == "--help") {
             std::cout << "Usage: orderbook_bench "
                          "[--commands N] [--warmup N] [--trials N] "
-                         "[--max-orders N] [--price-levels N]\n";
+                         "[--max-orders N] [--price-levels N] "
+                         "[--operation-latencies]\n";
             std::exit(0);
+        }
+        if (argument == "--operation-latencies") {
+            options.operation_latencies = true;
+            continue;
         }
         if (index + 1 >= argc) {
             throw std::invalid_argument(std::string(argument) + " requires a value");
@@ -656,6 +821,67 @@ template <typename Book>
         }
     }
     return options;
+}
+
+void print_operation_results(
+    const Options& options,
+    double overhead,
+    const std::vector<Result>& results)
+{
+    std::cout << "Reference versus fast book operation latencies\n"
+              << "  measured samples/operation: " << options.commands << '\n'
+              << "  warm-up samples/operation:  " << options.warmup << '\n'
+              << "  configured order capacity:  " << options.max_orders << '\n'
+              << "  configured price levels:    " << options.price_levels << '\n'
+              << "  latency timer:              "
+#if ORDERBOOK_HAS_INVARIANT_TSC
+              << "serialized invariant TSC (" << std::fixed << std::setprecision(3)
+              << tsc_ticks_per_nanosecond() << " ticks/ns)\n"
+#else
+              << "std::chrono::steady_clock\n"
+#endif
+              << "  estimated timer-pair cost:  " << std::setprecision(1)
+              << overhead << " ns\n\n";
+
+    std::cout << std::left << std::setw(14) << "operation"
+              << std::setw(11) << "book"
+              << std::right << std::setw(11) << "p50ns"
+              << std::setw(11) << "p90ns"
+              << std::setw(11) << "p99ns"
+              << std::setw(15) << "trades/sample" << '\n';
+    for (const Result& result : results) {
+        std::cout << std::left << std::setw(14) << result.name
+                  << std::setw(11) << result.implementation
+                  << std::right << std::fixed << std::setprecision(1)
+                  << std::setw(11) << result.p50
+                  << std::setw(11) << result.p90
+                  << std::setw(11) << result.p99
+                  << std::setprecision(3)
+                  << std::setw(15) << result.trades_per_command << '\n';
+    }
+
+    std::cout << "\nFast/reference latency ratio (lower is better):\n"
+              << std::left << std::setw(14) << "operation"
+              << std::right << std::setw(13) << "p50"
+              << std::setw(13) << "p90"
+              << std::setw(13) << "p99" << '\n';
+    for (std::size_t index = 0; index + 1 < results.size(); index += 2) {
+        const Result& reference = results[index];
+        const Result& fast = results[index + 1];
+        std::cout << std::left << std::setw(14) << reference.name
+                  << std::right << std::fixed << std::setprecision(3)
+                  << std::setw(12) << fast.p50 / reference.p50 << 'x'
+                  << std::setw(12) << fast.p90 / reference.p90 << 'x'
+                  << std::setw(12) << fast.p99 / reference.p99 << 'x' << '\n';
+    }
+
+    std::uint64_t checksum = 0;
+    for (const Result& result : results) {
+        checksum = mix_checksum(checksum, result.checksum);
+    }
+    std::cout << "\nchecksum: 0x" << std::hex << checksum << std::dec << '\n'
+              << "Only the named operation is timed; its state-preparation command is not.\n"
+              << "Latency includes the reported timer-pair cost and is not adjusted.\n";
 }
 
 void print_results(
@@ -782,6 +1008,40 @@ int main(int argc, char** argv)
             throw std::invalid_argument("command count is too large");
         }
         const std::size_t total = options.commands + options.warmup;
+
+        if (options.operation_latencies) {
+            if (options.max_orders < 3) {
+                throw std::invalid_argument(
+                    "--operation-latencies requires --max-orders of at least 3");
+            }
+            std::vector<Result> results;
+            results.reserve(8);
+            const auto append_results = [&](OperationScenario scenario) {
+                Result reference = benchmark_operation<OrderBook>(
+                    scenario, options, "reference");
+                Result fast = benchmark_operation<FastOrderBook>(
+                    scenario, options, "fast");
+                if (reference.checksum != fast.checksum ||
+                    reference.live_orders != fast.live_orders ||
+                    reference.trades_per_command != fast.trades_per_command) {
+                    throw std::runtime_error(
+                        "benchmark semantic mismatch for operation: " + scenario.name);
+                }
+                results.push_back(std::move(reference));
+                results.push_back(std::move(fast));
+            };
+
+            append_results(matching_operation(
+                total, TimeInForce::gtc, "match-gtc", 10'000'000));
+            append_results(matching_operation(
+                total, TimeInForce::ioc, "match-ioc", 20'000'000));
+            append_results(matching_operation(
+                total, TimeInForce::fok, "match-fok", 30'000'000));
+            append_results(cancellation_operation(
+                total, 40'000'000, options.max_orders));
+            print_operation_results(options, clock_overhead(), results);
+            return 0;
+        }
 
         std::vector<Scenario> scenarios;
         scenarios.reserve(6);

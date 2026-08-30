@@ -115,7 +115,7 @@ public:
         return find(id).has_value();
     }
 
-    [[nodiscard]] bool erase(OrderId id) noexcept
+    [[nodiscard]] std::optional<PoolIndex> find_and_erase(OrderId id) noexcept
     {
         const std::size_t start = bucket_for(id);
         std::size_t bucket = start;
@@ -125,20 +125,26 @@ public:
             Entry& entry = entries_[bucket];
             if (!entry.occupied) {
                 record_probes(probes);
-                return false;
+                return std::nullopt;
             }
             if (entry.id == id) {
+                const PoolIndex index = entry.pool_index;
                 erase_at(bucket);
                 assert(size_ != 0);
                 --size_;
                 record_probes(probes);
-                return true;
+                return index;
             }
             bucket = next_bucket(bucket);
         } while (bucket != start);
 
         record_probes(probes);
-        return false;
+        return std::nullopt;
+    }
+
+    [[nodiscard]] bool erase(OrderId id) noexcept
+    {
+        return find_and_erase(id).has_value();
     }
 
     [[nodiscard]] std::uint32_t size() const noexcept

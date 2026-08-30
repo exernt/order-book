@@ -1,6 +1,6 @@
 # C++ Order Book Implementation
 
-This repository contains a limit order book implementation using standard containers, as well as a latency-optimised implementation. 
+This repository contains a limit order book (one instrument only) implementation using standard containers, as well as a latency-optimised implementation. 
 
 ## Features
 
@@ -13,7 +13,6 @@ Key features of the latency-focused implementation include:
 - 4-level bitmap for price discovery
 - Cached best bid/ask
 - Rapidhash-based table for active order ID lookup
-
 
 ## Building
 
@@ -54,3 +53,9 @@ The benchmark runs six workloads:
 - cancel-heavy
 
 The benchmark reports reference and fast throughput, repeated-trial dispersion, p50/p90/p99/p99.9 latency, trades per command, final depth, ID-index diagnostics when enabled, checksum, and fast-book preallocated storage.
+
+```powershell
+./build/Release/orderbook_bench.exe --operation-latencies --commands 2000000 --warmup 200000 --max-orders 50000 --price-levels 201
+```
+
+`--operation-latencies` gives a breakdown by order type instead of overall workloads.

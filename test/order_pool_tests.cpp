@@ -327,6 +327,7 @@ void test_active_id_index_basic_operations()
     REQUIRE(index.size() == 0);
     REQUIRE(index.tombstones() == 0);
     REQUIRE(!index.find(42).has_value());
+    REQUIRE(!index.find_and_erase(42).has_value());
     REQUIRE(!index.erase(42));
 
     REQUIRE(index.insert(42, 3) == IdInsertResult::inserted);
@@ -337,6 +338,11 @@ void test_active_id_index_basic_operations()
     REQUIRE(index.erase(42));
     REQUIRE(!index.contains(42));
     REQUIRE(!index.erase(42));
+    REQUIRE(index.size() == 0);
+
+    REQUIRE(index.insert(77, 5) == IdInsertResult::inserted);
+    REQUIRE(index.find_and_erase(77) == PoolIndex{5});
+    REQUIRE(!index.contains(77));
     REQUIRE(index.size() == 0);
 
     // A deleted probe-chain slot must be reusable without losing later keys.
@@ -377,7 +383,7 @@ void test_active_id_index_wraparound_and_backward_shift()
 
     // The cluster occupies buckets 4, 0, and 1. Removing its head must shift
     // the wrapped entries backward so that lookup can still stop at an empty slot.
-    REQUIRE(index.erase(colliding_ids[0]));
+    REQUIRE(index.find_and_erase(colliding_ids[0]) == PoolIndex{10});
     REQUIRE(index.find(colliding_ids[1]) == PoolIndex{11});
     REQUIRE(index.find(colliding_ids[2]) == PoolIndex{12});
     REQUIRE(index.insert(colliding_ids[0], 13) == IdInsertResult::inserted);

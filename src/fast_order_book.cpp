@@ -31,8 +31,6 @@ using detail::PoolIndex;
 using detail::PriceLevel;
 using detail::invalid_index;
 
-
-// Side and TimeInForce checks (to avoid invalid orders)
 [[nodiscard]] constexpr bool is_valid(Side side) noexcept
 {
     return side == Side::buy || side == Side::sell;
@@ -367,7 +365,7 @@ CancelResult FastOrderBook::cancel(OrderId id) noexcept
     if (id == 0) {
         return {0, CancelStatus::invalid};
     }
-    const auto location = impl_->active_orders.find(id);
+    const auto location = impl_->active_orders.find_and_erase(id);
     if (!location.has_value()) {
         return {0, CancelStatus::not_found};
     }
@@ -383,9 +381,6 @@ CancelResult FastOrderBook::cancel(OrderId id) noexcept
         impl_->vacate_level(side, price_index);
     }
 
-    const bool erased = impl_->active_orders.erase(id);
-    assert(erased);
-    (void)erased;
     impl_->pool.release(index);
     return {canceled, CancelStatus::accepted};
 }
